@@ -42,6 +42,7 @@ public struct StackyModel: Sendable {
         public var check_threshold: Double?
         public var imgsz: Int?
         public var pad: Double?
+        public var detector_kind: String?  // nil = "yolo"; "heatmap-v1" = Stacky box-finder
     }
 
     /// Preprocessing versions this StackyKit can run. A model asking for another one throws `unsupportedModel`
@@ -65,6 +66,7 @@ public struct StackyModel: Sendable {
         if let f = m.format, f > supportedFormat { throw StackyError.unsupportedModel("manifest format \(f)") }
         let pre = m.preprocess ?? "swift-v1"
         guard supportedPreprocess.contains(pre) else { throw StackyError.unsupportedModel("preprocess \(pre)") }
+        if let k = m.detector_kind, !["yolo", "heatmap-v1"].contains(k) { throw StackyError.unsupportedModel("detector \(k)") }
         let color = folder.appendingPathComponent("color.json")
         guard fm.fileExists(atPath: color.path) else { throw StackyError.missingFile("color.json") }
 
@@ -153,7 +155,8 @@ public final class StackyReader {
         self.model = model
         let m = model.manifest
         pipeline = try FramePipeline.load(detector: model.detector, reader: model.reader, check: model.check, colorJSON: model.color,
-                                          detectorConf: m.detector_conf, accept: m.accept, checkThreshold: m.check_threshold)
+                                          detectorConf: m.detector_conf, accept: m.accept, checkThreshold: m.check_threshold,
+                                          detectorKind: m.detector_kind)
         pipeline.useMemory = options.frameMemory
         pipeline.pairCorners = options.pairCorners
     }
