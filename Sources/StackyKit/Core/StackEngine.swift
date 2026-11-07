@@ -1,0 +1,324 @@
+import Foundation
+import Combine
+import CoreGraphics
+
+/// Stack scanner engine: places, not sightings.
+/// Every frame gives a short run of cards in order along the spread (corners on the spread's line, sorted along it).
+/// That run is lined up against the stack so far (like stitching a panorama), with a small dynamic program:
+///   match a corner to a place (score: does its reading agree with what that place already looks like),
+///   skip a place (a corner the detector missed this frame), or add a new place (cheap at the ends, costly in the
+///   middle; never past the deck size, never past a known end of the spread).
+/// The run is also tried reversed, in case the spread direction flipped. A frame is used only if it agrees with
+/// the stack on enough places; otherwise it is ignored (nothing is added from frames that do not line up).
+/// Each place adds up evidence from every frame that saw it (tempered), so showing cards again simply makes
+/// those places surer. Cards are then given to places all at once: each card once in the deck (Hungarian
+/// assignment on the places' probabilities), so a misread is fixed when the right card turns up elsewhere.
+/// End of the spread: the last card is fully visible, both indexes (one upright, one upside down). When a run
+/// ends on such a card (paired by CornerPairing) at the last place, nothing more is added after it.
+final class StackScan: ObservableObject {
+    struct Entry: Identifiable, Equatable {
+        let id: UUID
+        var card: Card
+        var sure: Bool
+        var checked = false   // set by hand ("Use")
+    }
+    enum State { case good, verify, missing, notYet }
+    struct Section: Identifiable, Equatable {
+        var start: Int, end: Int
+        var before: Card?, after: Card?
+        var id: Int { start }
+    }
+
+    @Published private(set) var entries: [Entry] = []
+    @Published private(set) var visible: Set<Int> = []     // places seen in the current frame
+    @Published private(set) var endLocked = false
+    @Published private(set) var startLocked = false
+    @Published var deckSize = 52 { didSet { assign() } }
+    @Published var entriesVersion = 0
+    @Published private(set) var lost = false   // frames keep not lining up: go back to cards already scanned
+    private var rejected = 0
+    var fullDeck: Bool { deckSize == 52 }
+
+    // One place = summed tempered log-probabilities over the 52 cards.
+    private var ids: [UUID] = []
+    private var logp: [[Float]] = []
+    private var seen: [Int] = []
+    private var miss: [Int] = []     // frames the place was in view (inside the run) but not matched
+    private var pinned: [Card?] = []
+    private var axis = CGVector(dx: 1, dy: 0)
+
+    static let temper: Float = 0.5
+
+    func reset() { rejected = 0; lost = false; ids = []; logp = []; seen = []; miss = []; pinned = []; endLocked = false; startLocked = false; visible = []; assign() }
+    func undo() {
+        guard !ids.isEmpty else { return }
+        ids.removeLast(); logp.removeLast(); seen.removeLast(); miss.removeLast(); pinned.removeLast(); endLocked = false; assign()
+    }
+
+    // MARK: frame input
+
+    private struct Item { var w: [Float]; var paired: Bool; var accepted: Bool }
+
+    func feed(_ cards: [SeenCard]) {
+        let run = window(cards)
+        guard !run.isEmpty else { if !visible.isEmpty { visible = [] }; return }
+        let n = ids.count
+        let a = align(run)
+        let aStrong = a.ops.filter { if case .match(_, _, let s) = $0 { return s >= 1.0 }; return false }.count
+        let b = n > 0 && run.count > 2 && aStrong < 2 ? align(run.reversed()) : nil   // spread direction flipped?
+        let best = (b != nil && b!.score > a.score) ? b! : a
+        let items = (b != nil && b!.score > a.score) ? Array(run.reversed()) : run
+        // Use the frame only if it lines up: enough strong matches (or a first / single new card).
+        let strong = best.ops.filter { if case .match(_, _, let s) = $0 { return s >= 1.0 }; return false }.count
+        let inserts = best.ops.filter { if case .insert = $0 { return true }; return false }.count
+        if n == 0 {
+            guard items.contains(where: \.accepted) else { return }
+        } else if strong < (items.count > 3 ? 2 : 1) {
+            // a single sure card that matches nothing: a new card dealt on top
+            guard items.count == 1, items[0].accepted, inserts == 1, !endLocked, n < deckSize else {
+                visible = []; rejected += 1; if rejected >= 12, !lost { lost = true }; return
+            }
+        }
+        rejected = 0; if lost { lost = false }
+        apply(best.ops, items)
+    }
+
+    /// Corners on the spread's line, sorted along it, as 52-card probability vectors.
+    private func window(_ cards: [SeenCard]) -> [Item] {
+        let cs = cards.filter { $0.isCorner && $0.reading.rankProbs.count == 13 && $0.reading.suitProbs.count == 4 }
+        guard !cs.isEmpty else { return [] }
+        let pts = cs.map { CGPoint(x: $0.rect.midX, y: $0.rect.midY) }
+        var keep = Array(cs.indices)
+        if pts.count >= 3 {
+            let mx = pts.map(\.x).reduce(0, +) / CGFloat(pts.count), my = pts.map(\.y).reduce(0, +) / CGFloat(pts.count)
+            var sxx: CGFloat = 0, syy: CGFloat = 0, sxy: CGFloat = 0
+            for p in pts { sxx += (p.x - mx) * (p.x - mx); syy += (p.y - my) * (p.y - my); sxy += (p.x - mx) * (p.y - my) }
+            let ang = 0.5 * atan2(2 * sxy, sxx - syy)
+            var v = CGVector(dx: cos(ang), dy: sin(ang))
+            if abs(v.dx) >= 0.5 ? v.dx < 0 : v.dy < 0 { v = CGVector(dx: -v.dx, dy: -v.dy) }
+            axis = v
+            let h = cs.map { max($0.rect.width, $0.rect.height) }.sorted()[cs.count / 2]
+            keep = cs.indices.filter { abs((pts[$0].x - mx) * -v.dy + (pts[$0].y - my) * v.dx) <= 1.3 * h }   // off the line: other row / upside-down corners
+        }
+        let along = { (i: Int) in pts[i].x * self.axis.dx + pts[i].y * self.axis.dy }
+        return keep.sorted { along($0) < along($1) }.map { i in
+            let r = cs[i].reading
+            var w = [Float](repeating: 0, count: 52)
+            for s in 0..<4 { for k in 0..<13 { w[s * 13 + k] = r.suitProbs[s] * r.rankProbs[k] } }
+            let t = w.reduce(0, +); if t > 0 { w = w.map { $0 / t } }
+            return Item(w: w, paired: cs[i].pair != nil, accepted: cs[i].accepted)
+        }
+    }
+
+    private enum Op { case match(Int, Int, Float), skip, insert(Int) }   // match(item, place, score), insert(item)
+
+    private func posterior(_ p: Int) -> [Float] {
+        let l = logp[p], m = l.max() ?? 0
+        let e = l.map { exp($0 - m) }, s = e.reduce(0, +); return e.map { $0 / s }
+    }
+
+    private func align(_ run: [Item]) -> (score: Float, ops: [Op]) {
+        let n = ids.count, m = run.count, NEG: Float = -1e9
+        let Q = (0..<n).map(posterior)
+        func sim(_ j: Int, _ p: Int) -> Float {
+            var d: Float = 0; for c in 0..<52 { d += run[j].w[c] * Q[p][c] }
+            return max(-0.8, min(4, log(d + 1e-6) + log(52)))   // a misread still costs less than a new place
+        }
+        func insCost(_ p: Int) -> Float {
+            if n >= deckSize { return (p == n && !endLocked) || (p == 0 && !startLocked) ? -3 : NEG }   // full: only at an end, and a weak place makes room
+            if p == n && n > 0 { return endLocked ? NEG : -1.2 }   // new card at an end (more than a misread match: -0.8)
+            if p == 0 && n > 0 { return startLocked ? NEG : -1.2 }
+            return n == 0 ? 0 : -4.0
+        }
+        var dp = [[Float]](repeating: [Float](repeating: NEG, count: n + 1), count: m + 1)
+        var back = [[(Int, Int, Op)?]](repeating: [(Int, Int, Op)?](repeating: nil, count: n + 1), count: m + 1)
+        dp[0][0] = 0
+        for j in 0...m { for p in 0...n where dp[j][p] > NEG / 2 {
+            let base = dp[j][p]
+            if j < m, p < n { let s = sim(j, p); if base + s > dp[j + 1][p + 1] { dp[j + 1][p + 1] = base + s; back[j + 1][p + 1] = (j, p, .match(j, p, s)) } }
+            if p < n { let c: Float = (j == 0 || j == m) ? 0 : -0.7; if base + c > dp[j][p + 1] { dp[j][p + 1] = base + c; back[j][p + 1] = (j, p, .skip) } }
+            if j < m { let c = insCost(p); if c > NEG / 2, base + c > dp[j + 1][p] { dp[j + 1][p] = base + c; back[j + 1][p] = (j, p, .insert(j)) } }
+        } }
+        var ops: [Op] = [], j = m, p = n
+        while let b = back[j][p] { ops.append(b.2); j = b.0; p = b.1 }
+        return (dp[m][n], ops.reversed())
+    }
+
+    private func apply(_ ops: [Op], _ run: [Item]) {
+        var nid: [UUID] = [], nl: [[Float]] = [], ns: [Int] = [], nm: [Int] = [], np: [Card?] = []
+        let firstUsed = ops.firstIndex { if case .skip = $0 { return false }; return true } ?? 0
+        let lastUsed = ops.lastIndex { if case .skip = $0 { return false }; return true } ?? 0
+        var p = 0, vis = Set<Int>(), lastItemPlace: (item: Int, place: Int)?, firstItemPlace: (item: Int, place: Int)?
+        let t = Self.temper
+        for (k, op) in ops.enumerated() {
+            switch op {
+            case .match(let j, let q, _):
+                nid.append(ids[q]); nl.append(zip(logp[q], run[j].w).map { $0 + t * log($1 + 1e-5) }); ns.append(seen[q] + 1); nm.append(miss[q]); np.append(pinned[q]); p = q + 1
+            case .skip:
+                let inside = k > firstUsed && k < lastUsed   // in view this frame, yet not matched
+                nid.append(ids[p]); nl.append(logp[p]); ns.append(seen[p]); nm.append(miss[p] + (inside ? 1 : 0)); np.append(pinned[p]); p += 1
+                continue
+            case .insert(let j):
+                nid.append(UUID()); nl.append(run[j].w.map { t * log($0 + 1e-5) }); ns.append(1); nm.append(0); np.append(nil)
+                Haptic.tap()
+            }
+            vis.insert(nid.count - 1)
+            if case .match(let j, _, _) = op { if firstItemPlace == nil { firstItemPlace = (j, nid.count - 1) }; lastItemPlace = (j, nid.count - 1) }
+            if case .insert(let j) = op { if firstItemPlace == nil { firstItemPlace = (j, nid.count - 1) }; lastItemPlace = (j, nid.count - 1) }
+        }
+        // A place mostly skipped while in view was a phantom (a misread added as a new card): drop it.
+        var keep = nid.indices.filter { !(nm[$0] >= 2 && nm[$0] > ns[$0] && np[$0] == nil) }
+        // More places than cards: drop the least supported place out of view (a phantom at the far edge).
+        while keep.count > deckSize, let weakest = keep.filter({ !vis.contains($0) && np[$0] == nil }).min(by: { ns[$0] - 2 * nm[$0] < ns[$1] - 2 * nm[$1] }) {
+            keep.removeAll { $0 == weakest }
+        }
+        if keep.count < nid.count { vis = Set(vis.compactMap { keep.firstIndex(of: $0) }) }
+        ids = keep.map { nid[$0] }; logp = keep.map { nl[$0] }; seen = keep.map { ns[$0] }; miss = keep.map { nm[$0] }; pinned = keep.map { np[$0] }
+        if let l = lastItemPlace { lastItemPlace = keep.firstIndex(of: l.place).map { (l.item, $0) } }
+        if let f = firstItemPlace { firstItemPlace = keep.firstIndex(of: f.place).map { (f.item, $0) } }
+        // End of the spread: the run's outermost card shows both indexes and sits at the stack's end.
+        if let l = lastItemPlace, l.item == run.count - 1, run[l.item].paired, l.place == ids.count - 1 { endLocked = true }
+        if let f = firstItemPlace, f.item == 0, run[f.item].paired, f.place == 0, run.count > 1 { startLocked = true }
+        visible = vis
+        assign()
+    }
+
+    // MARK: cards for places (each card once)
+
+    private func assign() {
+        let n = ids.count
+        guard n > 0 else { entries = []; entriesVersion += 1; return }
+        let Q = (0..<n).map(posterior)
+        var cols: [Int]
+        if n <= 52 {
+            let cost: [[Double]] = (0..<n).map { i in
+                if let c = pinned[i], let k = Self.index(c) { return (0..<52).map { $0 == k ? 0 : 1e6 } }
+                return Q[i].map { -log(Double($0) + 1e-9) }
+            }
+            cols = Self.hungarian(cost)
+        } else {
+            cols = Q.map { q in q.indices.max { q[$0] < q[$1] }! }
+        }
+        let old = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
+        entries = (0..<n).map { i in
+            let c = cols[i], card = Self.card(c)
+            let best = Q[i].indices.max { Q[i][$0] < Q[i][$1] }!
+            let sure = pinned[i] != nil || (seen[i] >= 2 && Q[i][c] >= 0.9 && best == c)
+            var e = old[ids[i]] ?? Entry(id: ids[i], card: card, sure: sure)
+            e.card = card; e.sure = sure; e.checked = pinned[i] != nil
+            return e
+        }
+        entriesVersion += 1
+    }
+
+    static func index(_ c: Card) -> Int? {
+        guard let s = CardReader.suits.firstIndex(of: c.suit), let r = CardReader.ranks.firstIndex(of: c.rank) else { return nil }
+        return s * 13 + r
+    }
+    static func card(_ k: Int) -> Card { Card(CardReader.ranks[k % 13] + CardReader.suits[k / 13])! }
+
+    /// Min-cost assignment of n rows to distinct columns (n <= m). Returns the column of each row.
+    static func hungarian(_ a: [[Double]]) -> [Int] {
+        let n = a.count, m = a[0].count
+        var u = [Double](repeating: 0, count: n + 1), v = [Double](repeating: 0, count: m + 1)
+        var p = [Int](repeating: 0, count: m + 1), way = [Int](repeating: 0, count: m + 1)
+        for i in 1...n {
+            p[0] = i; var j0 = 0
+            var minv = [Double](repeating: .infinity, count: m + 1), used = [Bool](repeating: false, count: m + 1)
+            repeat {
+                used[j0] = true; let i0 = p[j0]; var delta = Double.infinity, j1 = 0
+                for j in 1...m where !used[j] {
+                    let cur = a[i0 - 1][j - 1] - u[i0] - v[j]
+                    if cur < minv[j] { minv[j] = cur; way[j] = j0 }
+                    if minv[j] < delta { delta = minv[j]; j1 = j }
+                }
+                for j in 0...m { if used[j] { u[p[j]] += delta; v[j] -= delta } else { minv[j] -= delta } }
+                j0 = j1
+            } while p[j0] != 0
+            repeat { let j1 = way[j0]; p[j0] = p[j1]; j0 = j1 } while j0 != 0
+        }
+        var ans = [Int](repeating: 0, count: n)
+        for j in 1...m where p[j] != 0 { ans[p[j] - 1] = j - 1 }
+        return ans
+    }
+
+    // MARK: results
+
+    func state(_ i: Int) -> State { entries[i].sure ? .good : .verify }
+    var toVerify: Int { entries.filter { !$0.sure }.count }
+    var complete: Bool { entries.count == deckSize && toVerify == 0 }
+
+    var sections: [Section] {
+        var out: [Section] = [], i = 0
+        while i < entries.count {
+            if entries[i].sure { i += 1; continue }
+            var j = i; while j + 1 < entries.count, !entries[j + 1].sure { j += 1 }
+            out.append(Section(start: i, end: j, before: i > 0 ? entries[i - 1].card : nil, after: j + 1 < entries.count ? entries[j + 1].card : nil))
+            i = j + 1
+        }
+        return out
+    }
+
+    var missing: [Card] {
+        guard fullDeck else { return [] }
+        let have = Set(entries.map(\.card)); return Card.deck.filter { !have.contains($0) }
+    }
+
+    /// Only Mnemonica gives a suggestion now (the assignment already uses "each card once").
+    func suggestion(_ i: Int) -> Card? {
+        guard let x = expected(i, mnemonica), x != entries[i].card else { return nil }
+        return x
+    }
+
+    func accept(_ c: Card, at i: Int) {
+        guard pinned.indices.contains(i) else { return }
+        for k in pinned.indices where pinned[k] == c { pinned[k] = nil }
+        pinned[i] = c; assign(); Haptic.tap()
+    }
+
+    func compare(_ stack: [Card]) -> (cutAt: Card, wrong: Set<Int>)? {
+        guard let i = entries.indices.first(where: { entries[$0].sure }), let k = stack.firstIndex(of: entries[i].card) else { return nil }
+        let offset = k - i; var wrong = Set<Int>()
+        for (n, e) in entries.enumerated() where stack[((n + offset) % 52 + 52) % 52] != e.card { wrong.insert(n) }
+        return (stack[((offset % 52) + 52) % 52], wrong)
+    }
+
+    /// Is this a known stack (cut or not)? Each neighbouring pair either follows the stack (a -> next card) or not.
+    /// A random deck follows by chance 1 time in 51; a real stack nearly always, allowing ~10% misreads.
+    struct StackMatch { let probability: Double; let cut: Int; let top: Card; let follows: Int; let pairs: Int }
+    func match(_ stack: [Card]) -> StackMatch? {
+        let pos = entries.compactMap { stack.firstIndex(of: $0.card) }
+        guard pos.count >= 3 else { return nil }
+        var follows = 0
+        for k in 1..<pos.count where pos[k] == (pos[k - 1] + 1) % stack.count { follows += 1 }
+        let pairs = pos.count - 1, pm = 0.9, pr = 1.0 / 51
+        let llr = Double(follows) * log(pm / pr) + Double(pairs - follows) * log((1 - pm) / (1 - pr))
+        let z = llr + log(0.2 / 0.8)
+        let probability = z > 30 ? 1 : 1 / (1 + exp(-z))
+        var offsets: [Int: Int] = [:]
+        for (i, p) in pos.enumerated() { offsets[((p - i) % stack.count + stack.count) % stack.count, default: 0] += 1 }
+        let cut = offsets.max { $0.value < $1.value }!.key
+        return StackMatch(probability: probability, cut: cut, top: stack[cut], follows: follows, pairs: pairs)
+    }
+
+    func expected(_ i: Int, _ stack: [Card]) -> Card? {
+        guard let m = match(stack), m.probability >= 0.95 else { return nil }
+        return stack[(m.cut + i) % stack.count]
+    }
+
+    var text: String { entries.indices.map { "\($0 + 1). \(entries[$0].card.pretty)\(entries[$0].sure ? "" : " (verify)")" }.joined(separator: "\n") }
+
+    #if DEBUG
+    func previewFill() {
+        for (k, c) in mnemonica.prefix(40).enumerated() {
+            var l = [Float](repeating: -9, count: 52); l[Self.index(c)!] = k % 9 == 4 ? -8.5 : 0
+            ids.append(UUID()); logp.append(l); seen.append(3); miss.append(0); pinned.append(nil)
+        }
+        visible = [30, 31, 32, 33, 34]; assign()
+    }
+    #endif
+}
+
+/// Mnemonica (Juan Tamariz), top to bottom. Confirmed by Tristan (2026-11-04).
+let mnemonica: [Card] = ["4C", "2H", "7D", "3C", "4H", "6D", "AS", "5H", "9S", "2S", "QH", "3D", "QC", "8H", "6S", "5S", "9H", "KC", "2D", "JH", "3S", "8S", "6H", "10C", "5D", "KD", "2C", "3H", "8D", "5C", "KS", "JD", "8C", "10S", "KH", "JC", "7S", "10H", "AD", "4S", "7H", "4D", "AC", "9C", "JS", "QD", "7C", "QS", "10D", "6C", "AH", "9D"].compactMap { Card($0) }
+
