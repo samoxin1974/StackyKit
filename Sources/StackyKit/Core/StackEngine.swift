@@ -77,10 +77,16 @@ final class StackScan: ObservableObject {
         let inserts = best.ops.filter { if case .insert = $0 { return true }; return false }.count
         if n == 0 {
             guard items.contains(where: \.accepted) else { return }
-        } else if strong < (items.count > 3 ? 2 : 1) {
+        } else if strong < min(items.count > 3 ? 2 : 1, n) {   // never ask for more matches than the stack has places
             // a single sure card that matches nothing: a new card dealt on top
             guard items.count == 1, items[0].accepted, inserts == 1, !endLocked, n < deckSize else {
-                visible = []; rejected += 1; if rejected >= 12, !lost { lost = true }; return
+                visible = []; rejected += 1; if rejected >= 12, !lost { lost = true }
+                // A tiny start (1-2 places, e.g. one card glimpsed before the spread came into view) that nothing lines
+                // up with: start again from this frame instead of rejecting the whole scan.
+                if n <= 2, rejected >= 12, run.count >= 3, run.contains(where: \.accepted) {
+                    reset(); apply(align(run).ops, run)
+                }
+                return
             }
         }
         rejected = 0; if lost { lost = false }
