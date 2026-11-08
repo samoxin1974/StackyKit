@@ -57,7 +57,11 @@ final class StackScan: ObservableObject {
 
     // MARK: frame input
 
-    private struct Item { var w: [Float]; var paired: Bool; var accepted: Bool }
+    /// rel: how much this corner's reading and order are trusted. Tristan's rule (2026-11-07): cards in the middle
+    /// of the visible spread are reliable; at its sides, neighbouring indexes may be hidden, so the order seen there
+    /// (and the reading) is less sure.
+    private struct Item { var w: [Float]; var paired: Bool; var accepted: Bool; var rel: Float = 1 }
+    static let edgeRel: [Float] = [0.4, 0.7]   // outermost card, next one in (runs of 4+ cards)
 
     func feed(_ cards: [SeenCard]) {
         let run = window(cards)
@@ -101,13 +105,22 @@ final class StackScan: ObservableObject {
             keep = cs.indices.filter { abs((pts[$0].x - mx) * -v.dy + (pts[$0].y - my) * v.dx) <= 1.3 * h }   // off the line: other row / upside-down corners
         }
         let along = { (i: Int) in pts[i].x * self.axis.dx + pts[i].y * self.axis.dy }
-        return keep.sorted { along($0) < along($1) }.map { i in
+        var items = keep.sorted { along($0) < along($1) }.map { i in
             let r = cs[i].reading
             var w = [Float](repeating: 0, count: 52)
             for s in 0..<4 { for k in 0..<13 { w[s * 13 + k] = r.suitProbs[s] * r.rankProbs[k] } }
             let t = w.reduce(0, +); if t > 0 { w = w.map { $0 / t } }
             return Item(w: w, paired: cs[i].pair != nil, accepted: cs[i].accepted)
         }
+        if items.count >= 4 {
+            for (d, r) in Self.edgeRel.enumerated() where d < items.count / 2 {
+                items[d].rel = min(items[d].rel, r); items[items.count - 1 - d].rel = min(items[items.count - 1 - d].rel, r)
+            }
+            // A paired card (both indexes visible) at the very end is the spread's last card: fully visible, trusted.
+            if items[0].paired { items[0].rel = 1 }
+            if items[items.count - 1].paired { items[items.count - 1].rel = 1 }
+        }
+        return items
     }
 
     private enum Op { case match(Int, Int, Float), skip, insert(Int) }   // match(item, place, score), insert(item)
@@ -122,7 +135,7 @@ final class StackScan: ObservableObject {
         let Q = (0..<n).map(posterior)
         func sim(_ j: Int, _ p: Int) -> Float {
             var d: Float = 0; for c in 0..<52 { d += run[j].w[c] * Q[p][c] }
-            return max(-0.8, min(4, log(d + 1e-6) + log(52)))   // a misread still costs less than a new place
+            return run[j].rel * max(-0.8, min(4, log(d + 1e-6) + log(52)))   // a misread still costs less than a new place
         }
         func insCost(_ p: Int) -> Float {
             if n >= deckSize { return (p == n && !endLocked) || (p == 0 && !startLocked) ? -3 : NEG }   // full: only at an end, and a weak place makes room
@@ -136,7 +149,10 @@ final class StackScan: ObservableObject {
         for j in 0...m { for p in 0...n where dp[j][p] > NEG / 2 {
             let base = dp[j][p]
             if j < m, p < n { let s = sim(j, p); if base + s > dp[j + 1][p + 1] { dp[j + 1][p + 1] = base + s; back[j + 1][p + 1] = (j, p, .match(j, p, s)) } }
-            if p < n { let c: Float = (j == 0 || j == m) ? 0 : -0.7; if base + c > dp[j][p + 1] { dp[j][p + 1] = base + c; back[j][p + 1] = (j, p, .skip) } }
+            // Skipping a place = a card not seen this frame. Free outside the run; cheap next to the run's edge cards
+            // (their neighbours' indexes are often hidden); costly in the middle.
+            if p < n { let c: Float = (j == 0 || j == m) ? 0 : (m >= 4 && (j == 1 || j == m - 1)) ? -0.25 : -0.7
+                if base + c > dp[j][p + 1] { dp[j][p + 1] = base + c; back[j][p + 1] = (j, p, .skip) } }
             if j < m { let c = insCost(p); if c > NEG / 2, base + c > dp[j + 1][p] { dp[j + 1][p] = base + c; back[j + 1][p] = (j, p, .insert(j)) } }
         } }
         var ops: [Op] = [], j = m, p = n
@@ -153,13 +169,13 @@ final class StackScan: ObservableObject {
         for (k, op) in ops.enumerated() {
             switch op {
             case .match(let j, let q, _):
-                nid.append(ids[q]); nl.append(zip(logp[q], run[j].w).map { $0 + t * log($1 + 1e-5) }); ns.append(seen[q] + 1); nm.append(miss[q]); np.append(pinned[q]); p = q + 1
+                nid.append(ids[q]); nl.append(zip(logp[q], run[j].w).map { $0 + t * run[j].rel * log($1 + 1e-5) }); ns.append(seen[q] + 1); nm.append(miss[q]); np.append(pinned[q]); p = q + 1
             case .skip:
                 let inside = k > firstUsed && k < lastUsed   // in view this frame, yet not matched
                 nid.append(ids[p]); nl.append(logp[p]); ns.append(seen[p]); nm.append(miss[p] + (inside ? 1 : 0)); np.append(pinned[p]); p += 1
                 continue
             case .insert(let j):
-                nid.append(UUID()); nl.append(run[j].w.map { t * log($0 + 1e-5) }); ns.append(1); nm.append(0); np.append(nil)
+                nid.append(UUID()); nl.append(run[j].w.map { t * run[j].rel * log($0 + 1e-5) }); ns.append(1); nm.append(0); np.append(nil)
                 Haptic.tap()
             }
             vis.insert(nid.count - 1)
