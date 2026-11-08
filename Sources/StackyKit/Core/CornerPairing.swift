@@ -8,6 +8,7 @@ import CoreGraphics
 ///    the corner shown last frame stays;
 ///  - the hidden corner only adds evidence: rank and suit probabilities are multiplied and renormalised.
 final class CornerPairing {
+    nonisolated(unsafe) static var minDistance: CGFloat = 1.5   // in index heights; below this, two same-reading corners are not one card's pair
     private var direction = CGVector(dx: 1, dy: 1)   // shown -> hidden corner, image coordinates (y down)
     private var lastShown: [String: CGPoint] = [:]
 
@@ -22,7 +23,7 @@ final class CornerPairing {
             let ha = max(a.rect.width, a.rect.height), hb = max(b.rect.width, b.rect.height)
             guard max(ha / hb, hb / ha) <= 1.7 else { continue }
             let d = hypot(a.rect.midX - b.rect.midX, a.rect.midY - b.rect.midY)
-            guard d >= 1.5 * max(ha, hb), d <= 10 * max(ha, hb) else { continue }   // not the same box, still on one card
+            guard d >= Self.minDistance * max(ha, hb), d <= 10 * max(ha, hb) else { continue }   // a card's two indexes are ~6-7 index heights apart; neighbours in a fan (1-3) are other cards misread alike
             cand.append((d, i, j))
         } }
         var used = Set<Int>(), pairs: [(Int, Int)] = []

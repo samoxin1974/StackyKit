@@ -37,6 +37,9 @@ final class StackScan: ObservableObject {
     @Published var entriesVersion = 0
     @Published private(set) var lost = false   // frames keep not lining up: go back to cards already scanned
     private var rejected = 0
+    private var fullViews = 0   // frames that showed (nearly) the whole deck at once
+    nonisolated(unsafe) static var curvedOrder = true    // follow curved fans (chainOrder); false = straight line only
+    nonisolated(unsafe) static var fullViewSolve = true  // solve a whole-deck frame directly
     var fullDeck: Bool { deckSize == 52 }
 
     // One place = summed tempered log-probabilities over the 52 cards.
@@ -49,7 +52,7 @@ final class StackScan: ObservableObject {
 
     static let temper: Float = 0.5
 
-    func reset() { rejected = 0; lost = false; ids = []; logp = []; seen = []; miss = []; pinned = []; endLocked = false; startLocked = false; visible = []; assign() }
+    func reset() { fullViews = 0; rejected = 0; lost = false; ids = []; logp = []; seen = []; miss = []; pinned = []; endLocked = false; startLocked = false; visible = []; assign() }
     func undo() {
         guard !ids.isEmpty else { return }
         ids.removeLast(); logp.removeLast(); seen.removeLast(); miss.removeLast(); pinned.removeLast(); endLocked = false; assign()
@@ -66,6 +69,7 @@ final class StackScan: ObservableObject {
     func feed(_ cards: [SeenCard]) {
         let run = window(cards)
         guard !run.isEmpty else { if !visible.isEmpty { visible = [] }; return }
+        if fullView(run) { return }
         let n = ids.count
         let a = align(run)
         let aStrong = a.ops.filter { if case .match(_, _, let s) = $0 { return s >= 1.0 }; return false }.count
@@ -93,25 +97,56 @@ final class StackScan: ObservableObject {
         apply(best.ops, items)
     }
 
+    /// One frame shows (nearly) the whole deck: solve it from that frame (2026-11-08). One reading per place, each card
+    /// once (assign), so a few misreads are fixed by elimination. A first or more complete full view replaces the places;
+    /// a full view with the same number of places adds its evidence place by place (direction checked). Returns false
+    /// to fall back to stitching (fewer corners than places we already have).
+    private func fullView(_ run: [Item]) -> Bool {
+        guard Self.fullViewSolve, run.count >= Int((Float(deckSize) * 0.9).rounded(.up)), run.count <= deckSize else { return false }
+        let t = Self.temper
+        func ev(_ it: Item) -> [Float] { it.w.map { t * log($0 + 1e-5) } }
+        if fullViews > 0, run.count == ids.count {
+            // same places: which direction lines up with what we have?
+            func fit(_ r: [Item]) -> Float { zip(0..<r.count, r).map { i, it in log(zip(posterior(i), it.w).map(*).reduce(0, +) + 1e-6) }.reduce(0, +) }
+            let items = fit(run) >= fit(run.reversed()) ? run : Array(run.reversed())
+            for (i, it) in items.enumerated() { logp[i] = zip(logp[i], ev(it)).map(+); seen[i] += 1 }
+        } else if fullViews == 0 || run.count > ids.count {
+            ids = run.map { _ in UUID() }; logp = run.map(ev); seen = run.map { _ in 1 }; miss = run.map { _ in 0 }; pinned = run.map { _ in nil }
+        } else { return false }
+        fullViews += 1; rejected = 0; lost = false
+        if ids.count == deckSize { endLocked = true; startLocked = true }
+        visible = Set(0..<ids.count)
+        assign()
+        return true
+    }
+
     /// Corners on the spread's line, sorted along it, as 52-card probability vectors.
     private func window(_ cards: [SeenCard]) -> [Item] {
         let cs = cards.filter { $0.isCorner && $0.reading.rankProbs.count == 13 && $0.reading.suitProbs.count == 4 }
         guard !cs.isEmpty else { return [] }
         let pts = cs.map { CGPoint(x: $0.rect.midX, y: $0.rect.midY) }
-        var keep = Array(cs.indices)
+        let h = cs.map { max($0.rect.width, $0.rect.height) }.sorted()[cs.count / 2]
+        var order = Array(cs.indices)
+        var straight = true
         if pts.count >= 3 {
+            // Straight spread: corners near one line, sorted along it (other row / upside-down corners left out).
             let mx = pts.map(\.x).reduce(0, +) / CGFloat(pts.count), my = pts.map(\.y).reduce(0, +) / CGFloat(pts.count)
             var sxx: CGFloat = 0, syy: CGFloat = 0, sxy: CGFloat = 0
             for p in pts { sxx += (p.x - mx) * (p.x - mx); syy += (p.y - my) * (p.y - my); sxy += (p.x - mx) * (p.y - my) }
             let ang = 0.5 * atan2(2 * sxy, sxx - syy)
             var v = CGVector(dx: cos(ang), dy: sin(ang))
             if abs(v.dx) >= 0.5 ? v.dx < 0 : v.dy < 0 { v = CGVector(dx: -v.dx, dy: -v.dy) }
-            axis = v
-            let h = cs.map { max($0.rect.width, $0.rect.height) }.sorted()[cs.count / 2]
-            keep = cs.indices.filter { abs((pts[$0].x - mx) * -v.dy + (pts[$0].y - my) * v.dx) <= 1.3 * h }   // off the line: other row / upside-down corners
+            let near = cs.indices.filter { abs((pts[$0].x - mx) * -v.dy + (pts[$0].y - my) * v.dx) <= 1.3 * h }
+            // Curved fan (many corners off the line): follow the corners neighbour to neighbour instead.
+            let chain = Self.curvedOrder && near.count < Int(0.85 * Double(cs.count)) ? Self.chainOrder(pts, h: h) : []
+            if chain.count > near.count {
+                order = chain; straight = false
+                let a = pts[chain[0]], b = pts[chain[chain.count - 1]], len = max(1, hypot(b.x - a.x, b.y - a.y))
+                axis = CGVector(dx: (b.x - a.x) / len, dy: (b.y - a.y) / len)
+            } else { axis = v; order = near }
         }
-        let along = { (i: Int) in pts[i].x * self.axis.dx + pts[i].y * self.axis.dy }
-        var items = keep.sorted { along($0) < along($1) }.map { i in
+        if straight { let along = { (i: Int) in pts[i].x * self.axis.dx + pts[i].y * self.axis.dy }; order.sort { along($0) < along($1) } }
+        var items = order.map { i in
             let r = cs[i].reading
             var w = [Float](repeating: 0, count: 52)
             for s in 0..<4 { for k in 0..<13 { w[s * 13 + k] = r.suitProbs[s] * r.rankProbs[k] } }
@@ -127,6 +162,60 @@ final class StackScan: ObservableObject {
             if items[items.count - 1].paired { items[items.count - 1].rel = 1 }
         }
         return items
+    }
+
+    /// Corners in order along the spread, for straight spreads and curved fans alike (2026-11-08; the old straight-line
+    /// fit dropped most corners of a fan). Corners within 2.5 index heights of each other are linked; the biggest linked
+    /// group is the spread (the other row of upside-down corners is about a card length away, so it is left out). The
+    /// group is walked nearest neighbour to nearest neighbour from one end, then pointed left-to-right (or top-to-bottom).
+    static func chainOrder(_ pts: [CGPoint], h: CGFloat) -> [Int] {
+        let n = pts.count
+        guard n > 2 else {
+            return n == 2 && (abs(pts[1].x - pts[0].x) >= abs(pts[1].y - pts[0].y) ? pts[1].x < pts[0].x : pts[1].y < pts[0].y) ? [1, 0] : Array(0..<n)
+        }
+        func d(_ i: Int, _ j: Int) -> CGFloat { hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y) }
+        // biggest linked group
+        var group = [Int](repeating: -1, count: n), best: [Int] = []
+        for s in 0..<n where group[s] < 0 {
+            var comp = [s], k = 0; group[s] = s
+            while k < comp.count { let i = comp[k]; k += 1; for j in 0..<n where group[j] < 0 && d(i, j) <= 2.5 * h { group[j] = s; comp.append(j) } }
+            if comp.count > best.count { best = comp }
+        }
+        // walk from an end: the point farthest from the group's middle, and the point farthest from that; keep the shorter walk
+        func walk(_ start: Int) -> ([Int], CGFloat) {
+            var path = [start], left = Set(best).subtracting([start]), total: CGFloat = 0
+            while let j = left.min(by: { d(path.last!, $0) < d(path.last!, $1) }) { total += d(path.last!, j); path.append(j); left.remove(j) }
+            return (path, total)
+        }
+        let cx = best.map { pts[$0].x }.reduce(0, +) / CGFloat(best.count), cy = best.map { pts[$0].y }.reduce(0, +) / CGFloat(best.count)
+        let e1 = best.max { hypot(pts[$0].x - cx, pts[$0].y - cy) < hypot(pts[$1].x - cx, pts[$1].y - cy) }!
+        let e2 = best.max { d(e1, $0) < d(e1, $1) }!
+        var path = [walk(e1), walk(e2)].min { $0.1 < $1.1 }!.0
+        // Tidy the walk (it can skip a corner in a crowded spot and pick it up later): move single corners and reverse
+        // stretches while that makes the path shorter (or-opt + 2-opt on an open path).
+        func len(_ p: [Int]) -> CGFloat { zip(p, p.dropFirst()).map { d($0, $1) }.reduce(0, +) }
+        var cur = len(path), improved = true, rounds = 0
+        while improved, rounds < 20 {
+            improved = false; rounds += 1
+            for i in 0..<path.count {
+                var p = path; let x = p.remove(at: i)
+                for j in 0...p.count where j != i {
+                    var q = p; q.insert(x, at: j); let l = len(q)
+                    if l < cur - 0.5 { path = q; cur = l; improved = true; break }
+                }
+                if improved { break }
+            }
+            if improved { continue }
+            outer: for i in 0..<(path.count - 1) {
+                for j in (i + 1)..<path.count {
+                    var q = path; q[i...j].reverse(); let l = len(q)
+                    if l < cur - 0.5 { path = q; cur = l; improved = true; break outer }
+                }
+            }
+        }
+        let a = pts[path[0]], b = pts[path[path.count - 1]]
+        if abs(b.x - a.x) >= 0.5 * hypot(b.x - a.x, b.y - a.y) ? b.x < a.x : b.y < a.y { path.reverse() }
+        return path
     }
 
     private enum Op { case match(Int, Int, Float), skip, insert(Int) }   // match(item, place, score), insert(item)
