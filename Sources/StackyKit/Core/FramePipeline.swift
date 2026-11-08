@@ -16,6 +16,9 @@ final class FramePipeline {
     let accept: Float, checkThreshold: Float
     var useMemory = true
     var pairCorners = false
+    /// Photo mode: search the frame in tiles x tiles overlapping pieces (each at the detector's full size) plus the whole
+    /// frame, so small indexes in a large still keep their detail. 1 = the live path (whole frame only).
+    var tiles = 1
     let memory = FrameMemory()
     let pairing = CornerPairing()
 
@@ -41,6 +44,41 @@ final class FramePipeline {
 
     /// Index boxes in frame pixels (x0, y0, x1, y1).
     func detect(_ frame: CGImage) -> [(Double, Double, Double, Double)] {
+        guard tiles > 1 else { return detectWhole(frame) }
+        var all = detectWhole(frame)
+        let W = Double(frame.width), H = Double(frame.height), n = Double(tiles), ov = 0.2
+        let tw = W / (n - (n - 1) * ov), th = H / (n - (n - 1) * ov)
+        for i in 0..<tiles { for j in 0..<tiles {
+            let x = Double(i) * tw * (1 - ov), y = Double(j) * th * (1 - ov)
+            let r = CGRect(x: x, y: y, width: min(tw, W - x), height: min(th, H - y)).integral
+            guard let piece = frame.cropping(to: r) else { continue }
+            let ox = Double(r.minX), oy = Double(r.minY)
+            for b in detectWhole(piece) {
+                // drop boxes cut by an inner tile edge; the neighbouring tile or the whole frame sees them whole
+                let m = 2.0
+                if (b.0 < m && r.minX > 0) || (b.1 < m && r.minY > 0) || (b.2 > Double(r.width) - m && r.maxX < CGFloat(W)) || (b.3 > Double(r.height) - m && r.maxY < CGFloat(H)) { continue }
+                all.append((b.0 + ox, b.1 + oy, b.2 + ox, b.3 + oy))
+            }
+        } }
+        return Self.mergeBoxes(all)
+    }
+
+    /// Greedy merge of overlapping boxes from tiles (IoU > .4, or one mostly inside another): keep the larger-area-first survivor.
+    static func mergeBoxes(_ b: [(Double, Double, Double, Double)]) -> [(Double, Double, Double, Double)] {
+        func area(_ a: (Double, Double, Double, Double)) -> Double { max(0, a.2 - a.0) * max(0, a.3 - a.1) }
+        var keep: [(Double, Double, Double, Double)] = []
+        // tile boxes come later in the list and are sharper; prefer them by walking backwards
+        for a in b.reversed() {
+            let dup = keep.contains { k in
+                let iw = max(0, min(a.2, k.2) - max(a.0, k.0)), ih = max(0, min(a.3, k.3) - max(a.1, k.1)), i = iw * ih
+                return i / (area(a) + area(k) - i + 1e-9) > 0.4 || i > 0.7 * min(area(a), area(k))
+            }
+            if !dup { keep.append(a) }
+        }
+        return keep
+    }
+
+    func detectWhole(_ frame: CGImage) -> [(Double, Double, Double, Double)] {
         let W = Double(frame.width), H = Double(frame.height)
         if let heatmap { return Self.heatmapBoxes(heatmap, frame, conf: detectorConf) }
         guard let detector else { return [] }

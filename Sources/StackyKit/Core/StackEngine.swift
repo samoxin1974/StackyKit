@@ -175,11 +175,19 @@ final class StackScan: ObservableObject {
         }
         func d(_ i: Int, _ j: Int) -> CGFloat { hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y) }
         // biggest linked group
-        var group = [Int](repeating: -1, count: n), best: [Int] = []
+        var group = [Int](repeating: -1, count: n), best: [Int] = [], comps: [[Int]] = []
         for s in 0..<n where group[s] < 0 {
             var comp = [s], k = 0; group[s] = s
             while k < comp.count { let i = comp[k]; k += 1; for j in 0..<n where group[j] < 0 && d(i, j) <= 2.5 * h { group[j] = s; comp.append(j) } }
-            if comp.count > best.count { best = comp }
+            comps.append(comp); if comp.count > best.count { best = comp }
+        }
+        // a missed card leaves a double gap: join groups of 3+ within 4.5 index heights (one missing card)
+        var joined = Set<Int>(), grew = true
+        while grew {
+            grew = false
+            for (ci, c) in comps.enumerated() where c != best && c.count >= 3 && !joined.contains(ci) && c.contains(where: { i in best.contains { d(i, $0) <= 4.5 * h } }) {
+                best += c; joined.insert(ci); grew = true
+            }
         }
         // walk from an end: the point farthest from the group's middle, and the point farthest from that; keep the shorter walk
         func walk(_ start: Int) -> ([Int], CGFloat) {
