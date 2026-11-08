@@ -125,4 +125,4 @@ StackyKit makes no network calls. Frames are processed in memory and dropped.
 ## Licence
 
 - **Code:** MIT (see `LICENSE`).
-- **Models:** the free model is the one before the newest. Its reader and corner-check networks are MIT. The current box-finder (detector) was trained with Ultralytics YOLOv8, which is AGPL-3.0, so it can't be MIT. The first model release waits for a box-finder under a permissive licence, or comes with the detector clearly marked AGPL-3.0.
+- **Models:** the free model is the one before the newest. Since v13, every network in a model folder is Stacky's own and MIT: the box-finder (detector), the corner check and the reader. They were trained from scratch on Stacky's own labelled footage, with no third-party model code or weights. Older model folders with a YOLO detector still load (`detector_kind` "yolo"), but they aren't published.
