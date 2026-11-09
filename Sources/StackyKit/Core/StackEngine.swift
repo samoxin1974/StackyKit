@@ -52,8 +52,9 @@ final class StackScan: ObservableObject {
 
     static let temper: Float = 0.5
 
-    func reset() { fullViews = 0; rejected = 0; lost = false; ids = []; logp = []; seen = []; miss = []; pinned = []; endLocked = false; startLocked = false; visible = []; assign() }
+    func reset() { apHits = [:]; apFirst = [:]; apOrder = []; apSure = [:]; sequenceMode = false; fullViews = 0; rejected = 0; lost = false; ids = []; logp = []; seen = []; miss = []; pinned = []; endLocked = false; startLocked = false; visible = []; assign() }
     func undo() {
+        if sequenceMode { guard let c = apOrder.popLast() else { return }; apFirst[c] = nil; apHits[c] = nil; apSure[c] = nil; assign(); return }
         guard !ids.isEmpty else { return }
         ids.removeLast(); logp.removeLast(); seen.removeLast(); miss.removeLast(); pinned.removeLast(); endLocked = false; assign()
     }
@@ -66,7 +67,48 @@ final class StackScan: ObservableObject {
     private struct Item { var w: [Float]; var paired: Bool; var accepted: Bool; var rel: Float = 1 }
     static let edgeRel: [Float] = [0.4, 0.7]   // outermost card, next one in (runs of 4+ cards)
 
-    func feed(_ cards: [SeenCard]) {
+    // MARK: first-appearance order (2026-11-09)
+    // Dealing one at a time, or spreading hand to hand as you go: there is no spread to line up yet, so the order is
+    // WHEN each card first shows. A card "appears" once read sure in `apNeed` frames within `apWindow` seconds.
+    // The scanner keeps both orders and shows the first-appearance one when the spatial order holds < 60% of the
+    // cards that appeared (back to spatial at 80%). Check-up on the 24 scan clips: 741 -> 884 cards in order
+    // (docs/STACK_SCANNING.md, scripts/scan_mode_choice.py).
+    @Published private(set) var sequenceMode = false
+    nonisolated(unsafe) static var appearanceOrder = true
+    static let apNeed = 2, apWindow: TimeInterval = 1.0, apSureGap: TimeInterval = 0.5
+    private var apHits: [Card: [TimeInterval]] = [:]
+    private var apFirst: [Card: TimeInterval] = [:]
+    private var apOrder: [Card] = []
+    private var apSure: [Card: Int] = [:]          // frames read sure, for "sure" in this mode
+    private var apIDs: [Card: UUID] = [:]
+    private var clock: TimeInterval = 0
+    /// Cards in first-appearance order (whatever the mode).
+    var appearanceCards: [Card] { apOrder }
+
+    /// Feed one frame. `at`: the frame's time in seconds (video time in replays); default: now.
+    func feed(_ cards: [SeenCard], at t: TimeInterval? = nil) {
+        let now = t ?? ProcessInfo.processInfo.systemUptime
+        clock = now
+        var thisFrame: Set<Card> = []
+        for c in cards where c.isCorner && c.accepted {
+            guard let card = Card(c.reading.card), !thisFrame.contains(card) else { continue }
+            thisFrame.insert(card)
+            apSure[card, default: 0] += 1
+            let h = (apHits[card] ?? []).filter { now - $0 <= Self.apWindow } + [now]
+            apHits[card] = h
+            if apFirst[card] == nil, h.count >= Self.apNeed, apOrder.count < deckSize { apFirst[card] = h[0]; apOrder.append(card) }
+        }
+        feedSpatial(cards)
+        guard Self.appearanceOrder else { return }
+        let was = sequenceMode
+        let a = Double(apOrder.count), sp = Double(ids.count)
+        if !sequenceMode, apOrder.count >= 4, sp < 0.6 * a { sequenceMode = true }
+        else if sequenceMode, sp >= 0.8 * a { sequenceMode = false }
+        if sequenceMode || was != sequenceMode { assign() }
+        if sequenceMode { visible = Set(apOrder.indices.filter { thisFrame.contains(apOrder[$0]) }) }
+    }
+
+    private func feedSpatial(_ cards: [SeenCard]) {
         let run = window(cards)
         guard !run.isEmpty else { if !visible.isEmpty { visible = [] }; return }
         if fullView(run) { return }
@@ -305,6 +347,17 @@ final class StackScan: ObservableObject {
     // MARK: cards for places (each card once)
 
     private func assign() {
+        if sequenceMode {
+            // Sure = read clearly (3+ frames) AND nothing else appeared within 0.5 s of it: cards that come out
+            // together have no reliable order between them (check-up: sure-but-wrong 48 -> 15 of the deal/knee places).
+            let t = apOrder.map { apFirst[$0] ?? 0 }
+            entries = apOrder.enumerated().map { i, c in
+                let id = apIDs[c] ?? UUID(); apIDs[c] = id
+                let gap = [i - 1, i + 1].filter { t.indices.contains($0) }.map { abs(t[i] - t[$0]) }.min() ?? 9
+                return Entry(id: id, card: c, sure: (apSure[c] ?? 0) >= 99 || ((apSure[c] ?? 0) >= 3 && gap >= Self.apSureGap))
+            }
+            entriesVersion += 1; return
+        }
         let n = ids.count
         guard n > 0 else { entries = []; entriesVersion += 1; return }
         let Q = (0..<n).map(posterior)
@@ -390,6 +443,13 @@ final class StackScan: ObservableObject {
     }
 
     func accept(_ c: Card, at i: Int) {
+        if sequenceMode {
+            guard apOrder.indices.contains(i) else { return }
+            let old = apOrder[i]
+            if old != c { apSure[old] = nil; apFirst[old] = nil; apHits[old] = nil }
+            if let j = apOrder.firstIndex(of: c), j != i { apOrder.remove(at: j); apOrder[j < i ? i - 1 : i] = c } else { apOrder[i] = c }
+            apSure[c] = 99; assign(); Haptic.tap(); return
+        }
         guard pinned.indices.contains(i) else { return }
         for k in pinned.indices where pinned[k] == c { pinned[k] = nil }
         pinned[i] = c; assign(); Haptic.tap()

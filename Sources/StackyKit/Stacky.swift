@@ -206,7 +206,10 @@ public final class StackyStackScanner {
     public var deckSize: Int { get { engine.deckSize } set { engine.deckSize = newValue } }
 
     /// Feed one frame's cards (from `StackyReader.read`, with frame memory and pairing on).
-    public func feed(_ cards: [StackyCard]) { engine.feed(cards.map(\.seen)) }
+    /// One camera frame's readings. `time`: the frame's time in seconds (default: now); pass video time when replaying a file.
+    public func feed(_ cards: [StackyCard], time: TimeInterval? = nil) { engine.feed(cards.map(\.seen), at: time) }
+    /// True when the order comes from when cards first showed (dealing, or spreading as you go) rather than from the spread.
+    public var isInShownOrder: Bool { engine.sequenceMode }
 
     public var order: [Place] { engine.entries.enumerated().map { Place(index: $0.offset, code: $0.element.card.code, isSure: $0.element.sure) } }
     public var sectionsToRescan: [Section] { engine.sections.map { Section(start: $0.start, end: $0.end, before: $0.before?.code, after: $0.after?.code) } }

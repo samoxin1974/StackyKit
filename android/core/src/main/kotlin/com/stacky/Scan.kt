@@ -153,6 +153,7 @@ internal class CornerPairing {
 
 /** Builds the order of a spread deck over many frames. See [StackyStackScanner]. */
 internal class StackScan(var deckSize: Int = 52) {
+    companion object { @JvmStatic var appearanceOrder = true }
     private class Item(val w: DoubleArray, val paired: Boolean, val accepted: Boolean, var rel: Double)
     private sealed class Op { class M(val j: Int, val p: Int, val s: Double) : Op(); object S : Op(); class I(val j: Int) : Op() }
     class Entry(val id: Int, val code: String, val sure: Boolean, val checked: Boolean)
@@ -169,14 +170,24 @@ internal class StackScan(var deckSize: Int = 52) {
     var visible: Set<Int> = emptySet(); private set
     private var axis = Pt(1.0, 0.0)
 
+    // First-appearance order (2026-11-09, same rule as the Swift and web scanners): dealing or spreading as you go has
+    // no spread to line up, so the order is when each card first shows (read sure in 2 frames within 1 s). Shown
+    // instead of the spatial order when that holds < 60% of the cards that appeared (back at 80%).
+    var sequenceMode = false; private set
+    private var apHits = HashMap<String, List<Double>>(); private var apFirst = HashMap<String, Double>(); private var apOrder = ArrayList<String>(); private var apSure = HashMap<String, Int>()
+    private val apIds = HashMap<String, Int>()
+    val appearanceCards: List<String> get() = apOrder
+
     init { reset() }
 
     fun reset() {
+        apHits = HashMap(); apFirst = HashMap(); apOrder = ArrayList(); apSure = HashMap(); sequenceMode = false
         fullViews = 0; rejected = 0; lost = false; ids = ArrayList(); logp = ArrayList(); seen = ArrayList(); miss = ArrayList(); pinned = ArrayList()
         endLocked = false; startLocked = false; visible = emptySet(); axis = Pt(1.0, 0.0); assign()
     }
 
     fun undo() {
+        if (sequenceMode) { if (apOrder.isNotEmpty()) { val c = apOrder.removeAt(apOrder.lastIndex); apHits.remove(c); apSure.remove(c) }; assign(); return }
         if (ids.isEmpty()) return
         ids.removeAt(ids.lastIndex); logp.removeAt(logp.lastIndex); seen.removeAt(seen.lastIndex); miss.removeAt(miss.lastIndex); pinned.removeAt(pinned.lastIndex)
         endLocked = false; assign()
@@ -184,7 +195,26 @@ internal class StackScan(var deckSize: Int = 52) {
 
     private fun newId() = ++uid
 
-    fun feed(cards: List<Seen>) {
+    /** One frame. [t]: seconds (default: now). */
+    fun feed(cards: List<Seen>, t: Double = System.nanoTime() / 1e9) {
+        val now = HashSet<String>()
+        for (c in cards) {
+            if (!c.accepted || !now.add(c.code)) continue
+            apSure[c.code] = (apSure[c.code] ?: 0) + 1
+            val h = (apHits[c.code] ?: emptyList()).filter { t - it <= AP_WINDOW } + t
+            apHits[c.code] = h
+            if (h.size >= AP_NEED && c.code !in apOrder && apOrder.size < deckSize) { apOrder.add(c.code); apFirst[c.code] = h[0] }
+        }
+        feedSpatial(cards)
+        if (!appearanceOrder) return
+        val was = sequenceMode; val a = apOrder.size.toDouble(); val sp = ids.size.toDouble()
+        if (!sequenceMode && apOrder.size >= 4 && sp < 0.6 * a) sequenceMode = true
+        else if (sequenceMode && sp >= 0.8 * a) sequenceMode = false
+        if (sequenceMode || was != sequenceMode) assign()
+        if (sequenceMode) visible = apOrder.indices.filter { apOrder[it] in now }.toSet()
+    }
+
+    private fun feedSpatial(cards: List<Seen>) {
         val run = window(cards)
         if (run.isEmpty()) { visible = emptySet(); return }
         if (fullView(run)) return
@@ -331,6 +361,16 @@ internal class StackScan(var deckSize: Int = 52) {
     }
 
     private fun assign() {
+        if (sequenceMode) {
+            // Sure = read clearly AND nothing else appeared within 0.5 s (cards that come out together have no reliable order).
+            val t = apOrder.map { apFirst[it] ?: 0.0 }
+            entries = apOrder.mapIndexed { i, c ->
+                val gap = listOf(i - 1, i + 1).filter { it in t.indices }.minOfOrNull { kotlin.math.abs(t[i] - t[it]) } ?: 9.0
+                val n = apSure[c] ?: 0
+                Entry(apIds.getOrPut(c) { newId() }, c, n >= 99 || (n >= 3 && gap >= AP_SURE_GAP), false)
+            }
+            return
+        }
         val n = ids.size
         if (n == 0) { entries = emptyList(); return }
         val Q = ids.indices.map { posterior(it) }
@@ -346,6 +386,13 @@ internal class StackScan(var deckSize: Int = 52) {
     }
 
     fun accept(code: String, i: Int) {
+        if (sequenceMode) {
+            if (i < 0 || i >= apOrder.size) return
+            val old = apOrder[i]; if (old != code) { apSure.remove(old); apHits.remove(old) }
+            val j = apOrder.indexOf(code)
+            if (j >= 0 && j != i) { apOrder.removeAt(j); apOrder[if (j < i) i - 1 else i] = code } else apOrder[i] = code
+            apSure[code] = 99; assign(); return
+        }
         if (i < 0 || i >= pinned.size) return
         for (k in pinned.indices) if (pinned[k] == code) pinned[k] = null
         pinned[i] = code; assign()
@@ -356,3 +403,7 @@ internal class StackScan(var deckSize: Int = 52) {
     val missing: List<String> get() { if (deckSize != 52) return emptyList(); val have = entries.map { it.code }.toSet(); return MNEMONICA.filter { it !in have } }
     fun match(stack: List<String> = MNEMONICA) = matchStack(entries.map { it.code }, stack)
 }
+
+internal const val AP_NEED = 2
+internal const val AP_WINDOW = 1.0
+internal const val AP_SURE_GAP = 0.5

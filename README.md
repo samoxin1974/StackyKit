@@ -166,6 +166,8 @@ val hand   = PokerHand.best(shown.map { it.code })   // "Full House", "Kings ful
 
 `StackyStackScanner` builds the order of a spread deck from many frames. It uses each card's position along the spread, not the order in which cards were seen, and it knows a deck holds each card once: showing a card again only makes its place surer, it never adds a duplicate.
 
+It also follows **the order cards are shown in**. When cards come out one at a time (dealt onto a pile, or spread from hand to hand in front of the camera), there is no spread to line up yet, so the order is when each card first appeared. The scanner switches to this by itself (`isInShownOrder`). A place in this order counts as sure only when nothing else appeared at the same moment. Pass each frame's time to `feed` when replaying a video file.
+
 <p align="center">
   <img src="docs/images/spread-read.jpg" width="800" alt="A whole deck spread in an arc on a dark table, with a red box on every index the model read.">
 </p>
