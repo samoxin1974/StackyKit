@@ -1,0 +1,5 @@
+# Android: JitPack builds the Gradle project in android/ (the Swift package at the root is for iOS and macOS).
+jdk:
+  - openjdk17
+install:
+  - cd android && ./gradlew :core:publishToMavenLocal :stackykit:publishToMavenLocal -x test

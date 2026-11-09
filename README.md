@@ -1,8 +1,8 @@
 # StackyKit
 
-Playing-card recognition for iOS and macOS. Point a camera at cards and get each card's rank, suit, confidence and position, frame after frame. It reads a fanned or spread deck, a poker hand, a single card, cards dealt on a table, and indexes as small as a few millimetres on screen.
+Playing-card recognition for iOS, macOS and Android. Point a camera at cards and get each card's rank, suit, confidence and position, frame after frame. It reads a fanned or spread deck, a poker hand, a single card, cards dealt on a table, and indexes as small as a few millimetres on screen.
 
-Everything runs on the device with Core ML (Neural Engine). No network and no account, and frames never leave the phone.
+Everything runs on the device: Core ML (Neural Engine) on Apple devices, ONNX Runtime on Android. No network and no account, and frames never leave the phone. Both versions run the same networks and the same steps, so they read the same cards. **Android:** see [android/README.md](android/README.md).
 
 ```swift
 import StackyKit
@@ -100,6 +100,28 @@ Tips for users:
 - Spread the cards so every index shows, and film along the spread at a steady pace.
 - Go back over sections the scanner marks. Showing cards again only makes those places surer, it never duplicates them.
 
+## Android (preview)
+
+The same API in Kotlin, from JitPack. It reads the same cards as the iOS and web versions on our test photos; it hasn't been tried on many phones yet, so reports are welcome.
+
+```kotlin
+// settings.gradle.kts
+dependencyResolutionManagement { repositories { google(); mavenCentral(); maven("https://jitpack.io") } }
+// app/build.gradle.kts
+implementation("com.github.tdemers218.StackyKit:stackykit:0.2.0")
+```
+
+```kotlin
+val model  = StackyModel.fromAssets(context, "stacky-v13")   // off the main thread, once
+val reader = StackyReader(model)
+
+// In your CameraX ImageAnalysis.Analyzer (output format RGBA_8888):
+val cards = reader.read(imageProxy.toStackyImage())          // turned upright for you
+for (c in cards) if (c.isSure) Log.i("Stacky", "${c.code} ${c.confidence} ${c.box}")
+```
+
+`StackyStackScanner`, `StackySteady` and poker hands (`PokerHand.best`) work as on iOS. Android 7 (API 24) or newer. The [sample app](android/sample) shows a card, a poker hand and a whole deck live. Details: [android/README.md](android/README.md).
+
 ## Command-line check (macOS)
 
 ```sh
@@ -116,7 +138,7 @@ swift run -c release stacky-read path/to/stacky-v11 spread.mov --scan     # deck
 
 ## Models and versions
 
-Free models are published on the Releases page. Each new release replaces the previous free model with a newer one. The manifest says which model you have (`model.name`, `model.manifest.exported`).
+Free models are published on the Releases page: a Core ML folder for iOS and macOS, and an ONNX folder (`detector.onnx`, `reader.onnx`, `check.onnx`, `model.json`) for Android and other platforms. Each new release replaces the previous free model with a newer one. The manifest says which model you have (`model.name`, `model.manifest.exported`).
 
 ## Privacy
 

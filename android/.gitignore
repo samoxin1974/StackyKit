@@ -1,0 +1,9 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+# Models come from the Releases page, not the repository.
+sample/src/main/assets/stacky-*/
+# The on-device test needs a model and a photo of a spread deck; neither is in the repository.
+stackykit/src/androidTest/assets/
