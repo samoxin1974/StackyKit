@@ -210,6 +210,9 @@ public final class StackyStackScanner {
     public func feed(_ cards: [StackyCard], time: TimeInterval? = nil) { engine.feed(cards.map(\.seen), at: time) }
     /// True when the order comes from when cards first showed (dealing, or spreading as you go) rather than from the spread.
     public var isInShownOrder: Bool { engine.sequenceMode }
+    /// In shown order: cards that were read long before they were confirmed (a card peeking out from under a dealt pile).
+    /// They sit where they were confirmed, are never sure, and may belong earlier. Tell the user.
+    public var appearedLate: [String] { engine.appearedLate.map(\.code) }
 
     public var order: [Place] { engine.entries.enumerated().map { Place(index: $0.offset, code: $0.element.card.code, isSure: $0.element.sure) } }
     public var sectionsToRescan: [Section] { engine.sections.map { Section(start: $0.start, end: $0.end, before: $0.before?.code, after: $0.after?.code) } }

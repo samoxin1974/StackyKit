@@ -106,6 +106,8 @@ class StackyStackScanner @JvmOverloads constructor(deckSize: Int = 52) {
     fun feed(cards: List<StackyCard>, timeSeconds: Double = System.nanoTime() / 1e9) = engine.feed(cards.map { it.seen }, timeSeconds)
     /** True when the order comes from when cards first showed (dealing, or spreading as you go) rather than from the spread. */
     val isInShownOrder: Boolean get() = engine.sequenceMode
+    /** In shown order: cards read long before they were confirmed (peeking out from under a dealt pile). Never sure; may belong earlier. */
+    val appearedLate: List<String> get() = engine.appearedLate
 
     /** The deck so far, top of the spread first. */
     val order: List<Place> get() = engine.entries.mapIndexed { i, e -> Place(i, e.code, e.sure) }

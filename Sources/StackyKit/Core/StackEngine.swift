@@ -52,9 +52,9 @@ final class StackScan: ObservableObject {
 
     static let temper: Float = 0.5
 
-    func reset() { apHits = [:]; apFirst = [:]; apOrder = []; apSure = [:]; sequenceMode = false; fullViews = 0; rejected = 0; lost = false; ids = []; logp = []; seen = []; miss = []; pinned = []; endLocked = false; startLocked = false; visible = []; assign() }
+    func reset() { apHits = [:]; apFirst = [:]; apOrder = []; apSure = [:]; apEver = [:]; apLate = []; sequenceMode = false; fullViews = 0; rejected = 0; lost = false; ids = []; logp = []; seen = []; miss = []; pinned = []; endLocked = false; startLocked = false; visible = []; assign() }
     func undo() {
-        if sequenceMode { guard let c = apOrder.popLast() else { return }; apFirst[c] = nil; apHits[c] = nil; apSure[c] = nil; assign(); return }
+        if sequenceMode { guard let c = apOrder.popLast() else { return }; apFirst[c] = nil; apHits[c] = nil; apSure[c] = nil; apLate.remove(c); assign(); return }
         guard !ids.isEmpty else { return }
         ids.removeLast(); logp.removeLast(); seen.removeLast(); miss.removeLast(); pinned.removeLast(); endLocked = false; assign()
     }
@@ -81,9 +81,17 @@ final class StackScan: ObservableObject {
     private var apOrder: [Card] = []
     private var apSure: [Card: Int] = [:]          // frames read sure, for "sure" in this mode
     private var apIDs: [Card: UUID] = [:]
+    // Late appearers (2026-11-09, Tristan's deal test): a card read sure once when dealt, then confirmed much later when
+    // it peeks out from under the pile, lands at the END of the order, which is wrong. On the deal/knee clips 13 of 29
+    // such cards were misplaced (runs/scan_checkup2/late_cards4.py); no timing rule places them right more often
+    // than appending does, so they stay where they land but are never "sure", and the app says they appeared late.
+    private var apEver: [Card: TimeInterval] = [:]  // first sure read ever
+    private var apLate: Set<Card> = []
     private var clock: TimeInterval = 0
     /// Cards in first-appearance order (whatever the mode).
     var appearanceCards: [Card] { apOrder }
+    /// Cards that were read long before they were confirmed: their place in the shown order may be too late.
+    var appearedLate: [Card] { apOrder.filter { apLate.contains($0) } }
 
     /// Feed one frame. `at`: the frame's time in seconds (video time in replays); default: now.
     func feed(_ cards: [SeenCard], at t: TimeInterval? = nil) {
@@ -94,9 +102,13 @@ final class StackScan: ObservableObject {
             guard let card = Card(c.reading.card), !thisFrame.contains(card) else { continue }
             thisFrame.insert(card)
             apSure[card, default: 0] += 1
+            if apEver[card] == nil { apEver[card] = now }
             let h = (apHits[card] ?? []).filter { now - $0 <= Self.apWindow } + [now]
             apHits[card] = h
-            if apFirst[card] == nil, h.count >= Self.apNeed, apOrder.count < deckSize { apFirst[card] = h[0]; apOrder.append(card) }
+            if apFirst[card] == nil, h.count >= Self.apNeed, apOrder.count < deckSize {
+                apFirst[card] = h[0]; apOrder.append(card)
+                if h[0] - (apEver[card] ?? h[0]) > Self.apWindow { apLate.insert(card) }
+            }
         }
         feedSpatial(cards)
         guard Self.appearanceOrder else { return }
@@ -354,7 +366,7 @@ final class StackScan: ObservableObject {
             entries = apOrder.enumerated().map { i, c in
                 let id = apIDs[c] ?? UUID(); apIDs[c] = id
                 let gap = [i - 1, i + 1].filter { t.indices.contains($0) }.map { abs(t[i] - t[$0]) }.min() ?? 9
-                return Entry(id: id, card: c, sure: (apSure[c] ?? 0) >= 99 || ((apSure[c] ?? 0) >= 3 && gap >= Self.apSureGap))
+                return Entry(id: id, card: c, sure: (apSure[c] ?? 0) >= 99 || ((apSure[c] ?? 0) >= 3 && gap >= Self.apSureGap && !apLate.contains(c)))
             }
             entriesVersion += 1; return
         }
@@ -446,9 +458,9 @@ final class StackScan: ObservableObject {
         if sequenceMode {
             guard apOrder.indices.contains(i) else { return }
             let old = apOrder[i]
-            if old != c { apSure[old] = nil; apFirst[old] = nil; apHits[old] = nil }
+            if old != c { apSure[old] = nil; apFirst[old] = nil; apHits[old] = nil; apLate.remove(old) }
             if let j = apOrder.firstIndex(of: c), j != i { apOrder.remove(at: j); apOrder[j < i ? i - 1 : i] = c } else { apOrder[i] = c }
-            apSure[c] = 99; assign(); Haptic.tap(); return
+            apSure[c] = 99; apLate.remove(c); assign(); Haptic.tap(); return
         }
         guard pinned.indices.contains(i) else { return }
         for k in pinned.indices where pinned[k] == c { pinned[k] = nil }

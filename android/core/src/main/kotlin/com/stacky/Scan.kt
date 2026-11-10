@@ -175,19 +175,22 @@ internal class StackScan(var deckSize: Int = 52) {
     // instead of the spatial order when that holds < 60% of the cards that appeared (back at 80%).
     var sequenceMode = false; private set
     private var apHits = HashMap<String, List<Double>>(); private var apFirst = HashMap<String, Double>(); private var apOrder = ArrayList<String>(); private var apSure = HashMap<String, Int>()
+    private var apEver = HashMap<String, Double>(); private var apLate = HashSet<String>()
     private val apIds = HashMap<String, Int>()
     val appearanceCards: List<String> get() = apOrder
+    /** Cards read long before they were confirmed (peeking out from under a dealt pile): never sure, may belong earlier. */
+    val appearedLate: List<String> get() = apOrder.filter { it in apLate }
 
     init { reset() }
 
     fun reset() {
-        apHits = HashMap(); apFirst = HashMap(); apOrder = ArrayList(); apSure = HashMap(); sequenceMode = false
+        apHits = HashMap(); apFirst = HashMap(); apOrder = ArrayList(); apSure = HashMap(); apEver = HashMap(); apLate = HashSet(); sequenceMode = false
         fullViews = 0; rejected = 0; lost = false; ids = ArrayList(); logp = ArrayList(); seen = ArrayList(); miss = ArrayList(); pinned = ArrayList()
         endLocked = false; startLocked = false; visible = emptySet(); axis = Pt(1.0, 0.0); assign()
     }
 
     fun undo() {
-        if (sequenceMode) { if (apOrder.isNotEmpty()) { val c = apOrder.removeAt(apOrder.lastIndex); apHits.remove(c); apSure.remove(c) }; assign(); return }
+        if (sequenceMode) { if (apOrder.isNotEmpty()) { val c = apOrder.removeAt(apOrder.lastIndex); apHits.remove(c); apSure.remove(c); apLate.remove(c) }; assign(); return }
         if (ids.isEmpty()) return
         ids.removeAt(ids.lastIndex); logp.removeAt(logp.lastIndex); seen.removeAt(seen.lastIndex); miss.removeAt(miss.lastIndex); pinned.removeAt(pinned.lastIndex)
         endLocked = false; assign()
@@ -201,9 +204,13 @@ internal class StackScan(var deckSize: Int = 52) {
         for (c in cards) {
             if (!c.accepted || !now.add(c.code)) continue
             apSure[c.code] = (apSure[c.code] ?: 0) + 1
+            if (c.code !in apEver) apEver[c.code] = t
             val h = (apHits[c.code] ?: emptyList()).filter { t - it <= AP_WINDOW } + t
             apHits[c.code] = h
-            if (h.size >= AP_NEED && c.code !in apOrder && apOrder.size < deckSize) { apOrder.add(c.code); apFirst[c.code] = h[0] }
+            if (h.size >= AP_NEED && c.code !in apOrder && apOrder.size < deckSize) {
+                apOrder.add(c.code); apFirst[c.code] = h[0]
+                if (h[0] - (apEver[c.code] ?: h[0]) > AP_WINDOW) apLate.add(c.code)   // late appearer: see StackEngine.swift
+            }
         }
         feedSpatial(cards)
         if (!appearanceOrder) return
@@ -367,7 +374,7 @@ internal class StackScan(var deckSize: Int = 52) {
             entries = apOrder.mapIndexed { i, c ->
                 val gap = listOf(i - 1, i + 1).filter { it in t.indices }.minOfOrNull { kotlin.math.abs(t[i] - t[it]) } ?: 9.0
                 val n = apSure[c] ?: 0
-                Entry(apIds.getOrPut(c) { newId() }, c, n >= 99 || (n >= 3 && gap >= AP_SURE_GAP), false)
+                Entry(apIds.getOrPut(c) { newId() }, c, n >= 99 || (n >= 3 && gap >= AP_SURE_GAP && c !in apLate), false)
             }
             return
         }
@@ -388,10 +395,10 @@ internal class StackScan(var deckSize: Int = 52) {
     fun accept(code: String, i: Int) {
         if (sequenceMode) {
             if (i < 0 || i >= apOrder.size) return
-            val old = apOrder[i]; if (old != code) { apSure.remove(old); apHits.remove(old) }
+            val old = apOrder[i]; if (old != code) { apSure.remove(old); apHits.remove(old); apLate.remove(old) }
             val j = apOrder.indexOf(code)
             if (j >= 0 && j != i) { apOrder.removeAt(j); apOrder[if (j < i) i - 1 else i] = code } else apOrder[i] = code
-            apSure[code] = 99; assign(); return
+            apSure[code] = 99; apLate.remove(code); assign(); return
         }
         if (i < 0 || i >= pinned.size) return
         for (k in pinned.indices) if (pinned[k] == code) pinned[k] = null
