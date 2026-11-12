@@ -53,10 +53,10 @@ How a frame is read:
 
 ### iOS and macOS
 
-In Xcode choose **File → Add Package Dependencies…** and enter `https://github.com/tdemers218/StackyKit`. In a `Package.swift`:
+In Xcode choose **File → Add Package Dependencies…** and enter `https://github.com/samoxin1974/StackyKit`. In a `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/tdemers218/StackyKit", from: "0.1.0")
+.package(url: "https://github.com/samoxin1974/StackyKit", from: "0.1.0")
 ```
 
 ```swift
