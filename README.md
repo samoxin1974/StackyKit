@@ -84,7 +84,7 @@ dependencyResolutionManagement {
 
 // app/build.gradle.kts
 dependencies {
-    implementation("com.github.tdemers218.StackyKit:stackykit:0.2.0")
+    implementation("com.github.samoxin1974.StackyKit:stackykit:0.2.0")
 }
 android {
     androidResources { noCompress += "onnx" }   // lets the model load straight from the APK
