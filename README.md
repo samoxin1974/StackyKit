@@ -253,4 +253,3 @@ cd android && ./gradlew :core:test             # Android logic tests, on any JVM
 - **Code:** MIT (see `LICENSE`).
 - **Models:** the free model is the version before the newest. Since v13, every network in a model folder is Stacky's own and MIT: the box-finder, the corner check and the reader. They were trained on Stacky's own labelled footage. The box-finder starts from torchvision's ImageNet MobileNetV3 weights (BSD-3-Clause); no YOLO or other AGPL code or weights are used. Older model folders with a YOLO detector still load (`detector_kind` "yolo"), but they aren't published.
 
-Questions, bug reports and footage offers: open an issue, or write to tdmagicsupport@gmail.com.
