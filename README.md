@@ -214,8 +214,6 @@ Tips to give your users:
 
 ## Accuracy and limits
 
-StackyKit is still in training. The networks are retrained every few weeks on new footage, and each version reads more cards right than the last. To help with footage of your own decks, write to **tdmagicsupport@gmail.com**.
-
 Known limits of v13:
 
 - **Decks.** Trained on standard red and black indexes (Bicycle-style). Unusual faces, jumbo indexes and four-colour decks are untested.
